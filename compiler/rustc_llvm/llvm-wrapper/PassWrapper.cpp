@@ -1121,6 +1121,65 @@ extern "C" void LLVMRustMarkAllFunctionsNounwind(LLVMModuleRef M) {
   }
 }
 
+extern "C" void LLVMRustApplyFPMathFlags(LLVMModuleRef M, uint32_t Flags) {
+  // Needs to match rustc_session::config::FPMathFlags
+  enum FPMathFlags: uint32_t {
+    AllowReassoc    = 1 << 0,
+    NoNaNs          = 1 << 1,
+    NoInfs          = 1 << 2,
+    NoSignedZeros   = 1 << 3,
+    AllowReciprocal = 1 << 4,
+    AllowContract   = 1 << 5,
+    ApproxFunc      = 1 << 6
+  };
+
+  uint32_t Fast = (
+    AllowReassoc
+    | NoNaNs
+    | NoInfs
+    | NoSignedZeros
+    | AllowReciprocal
+    | AllowContract
+    | ApproxFunc);
+
+  FastMathFlags FMF;
+  if (Flags == Fast) {
+    FMF.setFast(true);
+  } else {
+    if (Flags & AllowReassoc) {
+      FMF.setAllowReassoc(true);
+    }
+    if (Flags & NoNaNs) {
+      FMF.setNoNaNs(true);
+    }
+    if (Flags & NoInfs) {
+      FMF.setNoInfs(true);
+    }
+    if (Flags & NoSignedZeros) {
+      FMF.setNoSignedZeros(true);
+    }
+    if (Flags & AllowReciprocal) {
+      FMF.setAllowReciprocal(true);
+    }
+    if (Flags & AllowContract) {
+      FMF.setAllowContract(true);
+    }
+    if (Flags & ApproxFunc) {
+      FMF.setApproxFunc(true);
+    }
+  }
+
+  for (Function &F: unwrap(M)->getFunctionList()) {
+    for (BasicBlock &BB: F.getBasicBlockList()) {
+      for (Instruction &I: BB.getInstList()) {
+        if (isa<FPMathOperator>(I)) {
+          I.copyFastMathFlags(FMF);
+        }
+      }
+    }
+  }
+}
+
 extern "C" void
 LLVMRustSetDataLayoutFromTargetMachine(LLVMModuleRef Module,
                                        LLVMTargetMachineRef TMR) {

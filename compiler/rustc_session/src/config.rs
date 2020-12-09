@@ -2088,6 +2088,19 @@ impl PpMode {
     }
 }
 
+bitflags! {
+    #[derive(Default, Encodable, Decodable)]
+    pub struct FPMathFlags: u32 {
+        const ALLOW_REASSOC     = 1 << 0;
+        const NO_NANS           = 1 << 1;
+        const NO_INFS           = 1 << 2;
+        const NO_SIGNED_ZEROS   = 1 << 3;
+        const ALLOW_RECIPROCAL  = 1 << 4;
+        const ALLOW_CONTRACT    = 1 << 5;
+        const APPROX_FUNC       = 1 << 6;
+    }
+}
+
 /// Command-line arguments passed to the compiler have to be incorporated with
 /// the dependency tracking system for incremental compilation. This module
 /// provides some utilities to make this more convenient.
@@ -2110,7 +2123,7 @@ crate mod dep_tracking {
     use super::{
         CFGuard, CrateType, DebugInfo, ErrorOutputType, LinkerPluginLto, LtoCli, OptLevel,
         OutputTypes, Passes, SanitizerSet, SourceFileHashAlgorithm, SwitchWithOptPath,
-        SymbolManglingVersion, TrimmedDefPaths,
+        SymbolManglingVersion, TrimmedDefPaths, FPMathFlags,
     };
     use crate::lint;
     use crate::utils::NativeLibKind;
@@ -2192,6 +2205,7 @@ crate mod dep_tracking {
     impl_dep_tracking_hash_via_hash!(Option<SymbolManglingVersion>);
     impl_dep_tracking_hash_via_hash!(Option<SourceFileHashAlgorithm>);
     impl_dep_tracking_hash_via_hash!(TrimmedDefPaths);
+    impl_dep_tracking_hash_via_hash!(FPMathFlags);
 
     impl_dep_tracking_hash_for_sortable_vec_of!(String);
     impl_dep_tracking_hash_for_sortable_vec_of!(PathBuf);

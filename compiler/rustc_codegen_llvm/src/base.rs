@@ -142,6 +142,16 @@ pub fn compile_codegen_unit(
                     llvm::LLVMDeleteGlobal(old_g);
                 }
             }
+            
+            // Apply the FP fast-math flags after all the instructions are in place.
+            {
+                let fp_math_flags = cx.sess().opts.debugging_opts.fp_math;
+                if !fp_math_flags.is_empty() {
+                    unsafe {
+                        llvm::LLVMRustApplyFPMathFlags(llvm_module.llmod(), fp_math_flags.bits());
+                    }
+                }
+            }
 
             // Finalize code coverage by injecting the coverage map. Note, the coverage map will
             // also be added to the `llvm.used` variable, created next.

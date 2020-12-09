@@ -278,6 +278,9 @@ macro_rules! options {
         pub const parse_tls_model: &str =
             "one of supported TLS models (`rustc --print tls-models`)";
         pub const parse_target_feature: &str = parse_string;
+        pub const parse_fp_math_flags: &str = "`fast` or a combination of: `allow_reassoc`, \
+            `no_nans`, `no_infs`, `no_signed_zeros`, `allow_reciprocal`, `allow_contract`, or \
+            `approx_func`";
     }
 
     #[allow(dead_code)]
@@ -708,6 +711,39 @@ macro_rules! options {
                 None => false,
             }
         }
+
+        fn parse_fp_math_flags(slot: &mut FPMathFlags, v: Option<&str>) -> bool {
+            let mut table: BTreeMap<_, _> = [
+                ("allow_reassoc", FPMathFlags::ALLOW_REASSOC),
+                ("no_nans", FPMathFlags::NO_NANS),
+                ("no_infs", FPMathFlags::NO_INFS),
+                ("no_signed_zeros", FPMathFlags::NO_SIGNED_ZEROS),
+                ("allow_reciprocal", FPMathFlags::ALLOW_RECIPROCAL),
+                ("allow_contract", FPMathFlags::ALLOW_CONTRACT),
+                ("approx_func", FPMathFlags::APPROX_FUNC),
+            ]
+            .iter()
+            .copied()
+            .collect();
+            match v {
+                Some("fast") => {
+                    *slot = FPMathFlags::all();
+                    true
+                }
+                Some(s) => {
+                    let mut flags = FPMathFlags::empty();
+                    for key in s.split(',') {
+                        match table.remove(key) {
+                            Some(flag) => flags.insert(flag),
+                            None => return false,
+                        }
+                    }
+                    *slot = flags;
+                    true
+                }
+                None => false,
+            }
+        }
     }
 ) }
 
@@ -908,6 +944,8 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         "force overflow checks on or off"),
     force_unstable_if_unmarked: bool = (false, parse_bool, [TRACKED],
         "force all crates to be `rustc_private` unstable (default: no)"),
+    fp_math: FPMathFlags = (FPMathFlags::empty(), parse_fp_math_flags, [TRACKED],
+        "enable unsafe floating-point optimizations"),
     fuel: Option<(String, u64)> = (None, parse_optimization_fuel, [TRACKED],
         "set the optimization fuel quota for a crate"),
     function_sections: Option<bool> = (None, parse_opt_bool, [TRACKED],

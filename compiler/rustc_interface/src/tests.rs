@@ -7,7 +7,7 @@ use rustc_session::config::{build_configuration, build_session_options, to_crate
 use rustc_session::config::{rustc_optgroups, ErrorOutputType, ExternLocation, Options, Passes};
 use rustc_session::config::{CFGuard, ExternEntry, LinkerPluginLto, LtoCli, SwitchWithOptPath};
 use rustc_session::config::{
-    Externs, OutputType, OutputTypes, SanitizerSet, SymbolManglingVersion,
+    Externs, FPMathFlags, OutputType, OutputTypes, SanitizerSet, SymbolManglingVersion,
 };
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
@@ -549,6 +549,7 @@ fn test_debugging_options_tracking_hash() {
     tracked!(fewer_names, Some(true));
     tracked!(force_overflow_checks, Some(true));
     tracked!(force_unstable_if_unmarked, true);
+    tracked!(fp_math, FPMathFlags::FAST);
     tracked!(fuel, Some(("abc".to_string(), 99)));
     tracked!(function_sections, Some(false));
     tracked!(human_readable_cgu_names, true);
