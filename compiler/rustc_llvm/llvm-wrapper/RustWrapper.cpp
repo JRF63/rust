@@ -10,6 +10,7 @@
 #include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #include <iostream>
 
@@ -325,6 +326,13 @@ extern "C" void LLVMRustSetHasUnsafeAlgebra(LLVMValueRef V) {
 const char *UnsafeFPMathFunctionList = "rust.unsafe-fp-math.functions";
 const char *UnsafeFPMathTag = "rust.unsafe-fp-math.flags";
 
+void tagUnsafeFPMath(Function *F, uint32_t Flags) {
+  LLVMContext &C = F->getContext();
+  auto *FlagsAsConstantInt = ConstantInt::get(Type::getInt32Ty(C), Flags);
+  auto *FlagsAsMD = ConstantAsMetadata::get(FlagsAsConstantInt);
+  F->setMetadata(UnsafeFPMathTag, MDNode::get(C, {FlagsAsMD}));
+}
+
 uint32_t readUnsafeFPMathTag(Function *F, unsigned UnsafeFPMathID) {
   uint32_t Flags = 0;
   if (Metadata *Node = F->getMetadata(UnsafeFPMathID)) {
@@ -371,17 +379,132 @@ FastMathFlags rustUnsafeFPMathFlagsToFMF(uint32_t Flags) {
   return FMF;
 }
 
-extern "C" void LLVMRustTagFunctionUnsafeFPMath(LLVMValueRef Fn, uint32_t Flags) {
-  Function *F = unwrap<Function>(Fn);
-  Module *M = F->getParent();
-  LLVMContext &C = M->getContext();
+void setUnsafeFPMathOnCallees(Module *M, Function *P, unsigned UnsafeFPMathID) {
+  uint32_t Flags = readUnsafeFPMathTag(P, UnsafeFPMathID);
+  FastMathFlags FMF = rustUnsafeFPMathFlagsToFMF(Flags);
+  SmallVector<Function *, 8> Stack = {P};
+  SmallVector<char, 128> NameBuf;
 
-  // Tag this function
-  auto *FlagsAsConstantInt = ConstantInt::get(Type::getInt32Ty(C), Flags);
-  auto *FlagsAsMD = ConstantAsMetadata::get(FlagsAsConstantInt);
-  F->setMetadata(UnsafeFPMathTag, MDNode::get(C, {FlagsAsMD}));
+  auto isValidTarget = [=](Function *F) -> bool {
+    if (F == nullptr) {
+      return false;
+    }
+    // We can't access the definitions of intrinsics or externally
+    // defined functions.
+    if (F->isIntrinsic() || F->isDeclaration()) {
+      return false;
+    }
+    // This function has already been visited.
+    if (readUnsafeFPMathTag(F, UnsafeFPMathID) == Flags) {
+      return false;
+    }
+    return true;
+  };
+
+  auto nextTarget = [=, &NameBuf](Function *F) -> Function * {
+    bool CanDirectlyModify = false;
+    if (F == P) {
+      // Functions marked with the attribute _should_ be modified directly.
+      CanDirectlyModify = true;
+    } else {
+      GlobalValue::LinkageTypes L = F->getLinkage();
+      if (L == GlobalValue::LinkageTypes::InternalLinkage ||
+          L == GlobalValue::LinkageTypes::PrivateLinkage) {
+        // If all the users' functions have the same flag then this can be
+        // modified directly.
+        //
+        // This is a purposely simple heuristic. Completely determining whether
+        // the function can avoid being cloned requires SCC traversal of the
+        // call graph and can be more expensive than just cloning.
+        CanDirectlyModify = true;
+        for (User *U : F->users()) {
+          if (auto *I = dyn_cast<Instruction>(U)) {
+            if (readUnsafeFPMathTag(I->getFunction(), UnsafeFPMathID) ==
+                Flags) {
+              continue;
+            }
+          }
+          CanDirectlyModify = false;
+          break;
+        }
+      }
+    }
+
+    if (CanDirectlyModify) {
+      return F;
+    } else {
+      // oldname.fm{flags as hex}
+      StringRef NewName =
+          (F->getName() + ".fm" + Twine::utohexstr(Flags)).toStringRef(NameBuf);
+
+      // Get the previously cloned function or create a new one
+      Function *Clone = M->getFunction(NewName);
+      if (Clone == nullptr) {
+        ValueToValueMapTy VMap;
+        Clone = CloneFunction(F, VMap);
+        Clone->setName(NewName);
+        Clone->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
+      }
+      // Must manually clear to avoid concatenating the names.
+      NameBuf.clear();
+
+      return Clone;
+    }
+  };
+
+  while (!Stack.empty()) {
+    Function *F = Stack.back();
+    Stack.pop_back();
+
+    // Mark the function as traversed with respect to the current Flags.
+    tagUnsafeFPMath(F, Flags);
+
+    for (BasicBlock &BB : *F) {
+      for (Instruction &I : BB) {
+        if (isa<FPMathOperator>(I)) {
+          I.copyFastMathFlags(FMF);
+        }
+
+        if (auto *Call = dyn_cast<CallBase>(&I)) {
+          Function *Callee = Call->getCalledFunction();
+          if (isValidTarget(Callee)) {
+            Function *CalleeOrClone = nextTarget(Callee);
+            // If cloned..
+            if (Callee != CalleeOrClone) {
+              // Make the parent function call the Clone instead.
+              Call->setCalledFunction(CalleeOrClone);
+            }
+            Stack.push_back(CalleeOrClone);
+
+            // Rust doesn't emit the `callback` metadata so this does not do
+            // anything yet.
+            // // #include "llvm/IR/AbstractCallSite.h"
+            // forEachCallbackCallSite(*Call, [=, &Stack](AbstractCallSite &ACS) {
+            //   Function *Callback = ACS.getCalledFunction();
+            //   if (isValidTarget(Callback)) {
+            //     Function *CallbackOrClone = nextTarget(Callback);
+            //     if (Callback != CallbackOrClone) {
+            //       ACS.getInstruction()->setOperand(
+            //           ACS.getCallArgOperandNoForCallee(), CallbackOrClone);
+            //     }
+            //     Stack.push_back(CallbackOrClone);
+            //   }
+            // });
+          }
+        }
+      }
+    }
+  }
+}
+
+extern "C" void LLVMRustTagFunctionUnsafeFPMath(LLVMValueRef Fn,
+                                                uint32_t Flags) {
+  Function *F = unwrap<Function>(Fn);
+  tagUnsafeFPMath(F, Flags);
 
   // Add to the list of functions with unsafe fp-math
+  Module *M = F->getParent();
+  LLVMContext &C = M->getContext();
   auto *List = M->getOrInsertNamedMetadata(UnsafeFPMathFunctionList);
   auto *FuncName = MDString::get(C, F->getName());
   List->addOperand(MDNode::get(C, {FuncName}));
@@ -393,20 +516,11 @@ extern "C" void LLVMRustCheckAndApplyUnsafeFPMath(LLVMModuleRef Mod) {
     // Querying with StringRef is relatively expensive so cache the metadata ID
     unsigned UnsafeFPMathID = M->getContext().getMDKindID(UnsafeFPMathTag);
 
-    // Loop through all functions with the #[unsafe_fp_math(...)] attribute
+    // Loop through all functions with the #[fp_math(...)] attribute
     for (auto *MDN : List->operands()) {
       auto *FuncName = cast<MDString>(MDN->getOperand(0).get());
       Function *F = M->getFunction(FuncName->getString());
-      uint32_t Flags = readUnsafeFPMathTag(F, UnsafeFPMathID);
-      FastMathFlags FMF = rustUnsafeFPMathFlagsToFMF(Flags);
-
-      for (BasicBlock &BB : *F) {
-        for (Instruction &I : BB) {
-          if (isa<FPMathOperator>(I)) {
-            I.copyFastMathFlags(FMF);
-          }
-        }
-      }
+      setUnsafeFPMathOnCallees(M, F, UnsafeFPMathID);
     }
   }
 }
