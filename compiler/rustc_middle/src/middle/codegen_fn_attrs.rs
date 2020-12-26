@@ -38,6 +38,8 @@ pub struct CodegenFnAttrs {
     /// be generated against a specific instruction set. Only usable on architectures which allow
     /// switching between multiple instruction sets.
     pub instruction_set: Option<InstructionSetAttr>,
+    /// The `#[unsafe_fp_math(...)]` attribute
+    pub unsafe_fp_math_flags: UnsafeFPMathFlags,
 }
 
 bitflags! {
@@ -89,6 +91,19 @@ bitflags! {
     }
 }
 
+bitflags! {
+    #[derive(TyEncodable, TyDecodable, HashStable)]
+    pub struct UnsafeFPMathFlags: u32 {
+        const ALLOW_REASSOC     = (1 << 0);
+        const NO_NANS           = (1 << 1);
+        const NO_INFS           = (1 << 2);
+        const NO_SIGNED_ZEROS   = (1 << 3);
+        const ALLOW_RECIPROCAL  = (1 << 4);
+        const ALLOW_CONTRACT    = (1 << 5);
+        const APPROX_FUNC       = (1 << 6);
+    }
+}
+
 impl CodegenFnAttrs {
     pub fn new() -> CodegenFnAttrs {
         CodegenFnAttrs {
@@ -103,6 +118,7 @@ impl CodegenFnAttrs {
             link_section: None,
             no_sanitize: SanitizerSet::empty(),
             instruction_set: None,
+            unsafe_fp_math_flags: UnsafeFPMathFlags::empty(),
         }
     }
 

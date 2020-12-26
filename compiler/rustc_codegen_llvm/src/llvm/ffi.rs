@@ -1078,6 +1078,7 @@ extern "C" {
         Value: *const c_char,
     );
     pub fn LLVMRustRemoveFunctionAttributes(Fn: &Value, index: c_uint, attr: Attribute);
+    pub fn LLVMRustTagFunctionUnsafeFPMath(Fn: &Value, flags: u32);
 
     // Operations on parameters
     pub fn LLVMIsAArgument(Val: &Value) -> Option<&Value>;
@@ -1096,6 +1097,7 @@ extern "C" {
     // Operations on instructions
     pub fn LLVMIsAInstruction(Val: &Value) -> Option<&Value>;
     pub fn LLVMGetFirstBasicBlock(Fn: &Value) -> &BasicBlock;
+    pub fn LLVMRustCheckAndApplyUnsafeFPMath(M: &Module);
 
     // Operations on call sites
     pub fn LLVMSetInstructionCallConv(Instr: &Value, CC: c_uint);

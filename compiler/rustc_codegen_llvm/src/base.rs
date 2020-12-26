@@ -143,6 +143,10 @@ pub fn compile_codegen_unit(
                 }
             }
 
+            unsafe {
+                llvm::LLVMRustCheckAndApplyUnsafeFPMath(llvm_module.llmod());
+            }
+
             // Finalize code coverage by injecting the coverage map. Note, the coverage map will
             // also be added to the `llvm.used` variable, created next.
             if cx.sess().opts.debugging_opts.instrument_coverage {

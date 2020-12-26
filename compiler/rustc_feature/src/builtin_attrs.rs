@@ -270,6 +270,12 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         template!(List: "address, memory, thread"),
         experimental!(no_sanitize)
     ),
+    gated!(
+        unsafe_fp_math, AssumedUsed,
+        template!(List: "fast, allow_reassoc, no_nans, no_infs, no_signed_zeros, allow_reciprocal, \
+                         allow_contract, approx_func"),
+        experimental!(unsafe_fp_math)
+    ),
 
     // FIXME: #14408 assume docs are used since rustdoc looks at them.
     ungated!(doc, AssumedUsed, template!(List: "hidden|inline|...", NameValueStr: "string")),

@@ -286,6 +286,15 @@ pub fn from_fn_attrs(cx: &CodegenCx<'ll, 'tcx>, llfn: &'ll Value, instance: ty::
     // The target doesn't care; the subtarget reads our attribute.
     apply_tune_cpu_attr(cx, llfn);
 
+    unsafe {
+        if !codegen_fn_attrs.unsafe_fp_math_flags.is_empty() {
+            llvm::LLVMRustTagFunctionUnsafeFPMath(
+                llfn,
+                codegen_fn_attrs.unsafe_fp_math_flags.bits()
+            );
+        }
+    }
+
     let features = llvm_target_features(cx.tcx.sess)
         .map(|s| s.to_string())
         .chain(codegen_fn_attrs.target_features.iter().map(|f| {

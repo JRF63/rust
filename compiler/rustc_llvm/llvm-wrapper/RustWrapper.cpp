@@ -322,6 +322,95 @@ extern "C" void LLVMRustSetHasUnsafeAlgebra(LLVMValueRef V) {
   }
 }
 
+const char *UnsafeFPMathFunctionList = "rust.unsafe-fp-math.functions";
+const char *UnsafeFPMathTag = "rust.unsafe-fp-math.flags";
+
+uint32_t readUnsafeFPMathTag(Function *F, unsigned UnsafeFPMathID) {
+  uint32_t Flags = 0;
+  if (Metadata *Node = F->getMetadata(UnsafeFPMathID)) {
+    Metadata *MD = cast<MDNode>(Node)->getOperand(0).get();
+    auto *FlagsAsConstant = cast<ConstantAsMetadata>(MD)->getValue();
+    auto *FlagsAsConstantInt = cast<ConstantInt>(FlagsAsConstant);
+    Flags = static_cast<uint32_t>(FlagsAsConstantInt->getZExtValue());
+  }
+  return Flags;
+}
+
+FastMathFlags rustUnsafeFPMathFlagsToFMF(uint32_t Flags) {
+  struct Pair {
+    uint32_t Flag;
+    void (FastMathFlags::*SetFlag)(bool);
+  };
+
+  // Needs to match rustc_middle::middle::codegen_fn_attrs::UnsafeFPMathFlags
+  std::initializer_list<Pair> Pairs = {
+      {1 << 0, &FastMathFlags::setAllowReassoc},
+      {1 << 1, &FastMathFlags::setNoNaNs},
+      {1 << 2, &FastMathFlags::setNoInfs},
+      {1 << 3, &FastMathFlags::setNoSignedZeros},
+      {1 << 4, &FastMathFlags::setAllowReciprocal},
+      {1 << 5, &FastMathFlags::setAllowContract},
+      {1 << 6, &FastMathFlags::setApproxFunc}};
+
+  // Result of setting all the flags
+  uint32_t Fast = (1 << 7) - 1;
+
+  FastMathFlags FMF;
+
+  if (Flags == Fast) {
+    FMF.setFast(true);
+    return FMF;
+  }
+
+  for (auto P : Pairs) {
+    if (Flags & P.Flag) {
+      (FMF.*(P.SetFlag))(true);
+    }
+  }
+
+  return FMF;
+}
+
+extern "C" void LLVMRustTagFunctionUnsafeFPMath(LLVMValueRef Fn, uint32_t Flags) {
+  Function *F = unwrap<Function>(Fn);
+  Module *M = F->getParent();
+  LLVMContext &C = M->getContext();
+
+  // Tag this function
+  auto *FlagsAsConstantInt = ConstantInt::get(Type::getInt32Ty(C), Flags);
+  auto *FlagsAsMD = ConstantAsMetadata::get(FlagsAsConstantInt);
+  F->setMetadata(UnsafeFPMathTag, MDNode::get(C, {FlagsAsMD}));
+
+  // Add to the list of functions with unsafe fp-math
+  auto *List = M->getOrInsertNamedMetadata(UnsafeFPMathFunctionList);
+  auto *FuncName = MDString::get(C, F->getName());
+  List->addOperand(MDNode::get(C, {FuncName}));
+}
+
+extern "C" void LLVMRustCheckAndApplyUnsafeFPMath(LLVMModuleRef Mod) {
+  Module *M = unwrap(Mod);
+  if (auto *List = M->getNamedMetadata(UnsafeFPMathFunctionList)) {
+    // Querying with StringRef is relatively expensive so cache the metadata ID
+    unsigned UnsafeFPMathID = M->getContext().getMDKindID(UnsafeFPMathTag);
+
+    // Loop through all functions with the #[unsafe_fp_math(...)] attribute
+    for (auto *MDN : List->operands()) {
+      auto *FuncName = cast<MDString>(MDN->getOperand(0).get());
+      Function *F = M->getFunction(FuncName->getString());
+      uint32_t Flags = readUnsafeFPMathTag(F, UnsafeFPMathID);
+      FastMathFlags FMF = rustUnsafeFPMathFlagsToFMF(Flags);
+
+      for (BasicBlock &BB : *F) {
+        for (Instruction &I : BB) {
+          if (isa<FPMathOperator>(I)) {
+            I.copyFastMathFlags(FMF);
+          }
+        }
+      }
+    }
+  }
+}
+
 extern "C" LLVMValueRef
 LLVMRustBuildAtomicLoad(LLVMBuilderRef B, LLVMValueRef Source, const char *Name,
                         LLVMAtomicOrdering Order) {
