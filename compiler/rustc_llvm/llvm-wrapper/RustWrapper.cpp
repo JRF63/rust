@@ -326,13 +326,6 @@ extern "C" void LLVMRustSetHasUnsafeAlgebra(LLVMValueRef V) {
 const char *UnsafeFPMathFunctionList = "rust.unsafe-fp-math.functions";
 const char *UnsafeFPMathTag = "rust.unsafe-fp-math.flags";
 
-void tagUnsafeFPMath(Function *F, uint32_t Flags) {
-  LLVMContext &C = F->getContext();
-  auto *FlagsAsConstantInt = ConstantInt::get(Type::getInt32Ty(C), Flags);
-  auto *FlagsAsMD = ConstantAsMetadata::get(FlagsAsConstantInt);
-  F->setMetadata(UnsafeFPMathTag, MDNode::get(C, {FlagsAsMD}));
-}
-
 uint32_t readUnsafeFPMathTag(Function *F, unsigned UnsafeFPMathID) {
   uint32_t Flags = 0;
   if (Metadata *Node = F->getMetadata(UnsafeFPMathID)) {
@@ -379,148 +372,144 @@ FastMathFlags rustUnsafeFPMathFlagsToFMF(uint32_t Flags) {
   return FMF;
 }
 
-void setUnsafeFPMathOnCallees(Module *M, Function *P, unsigned UnsafeFPMathID) {
-  uint32_t Flags = readUnsafeFPMathTag(P, UnsafeFPMathID);
-  FastMathFlags FMF = rustUnsafeFPMathFlagsToFMF(Flags);
-  SmallVector<Function *, 8> Stack = {P};
-  SmallVector<char, 128> NameBuf;
-
-  auto isValidTarget = [=](Function *F) -> bool {
-    if (F == nullptr) {
-      return false;
-    }
-    // We can't access the definitions of intrinsics or externally
-    // defined functions.
-    if (F->isIntrinsic() || F->isDeclaration()) {
-      return false;
-    }
-    // This function has already been visited.
-    if (readUnsafeFPMathTag(F, UnsafeFPMathID) == Flags) {
-      return false;
-    }
-    return true;
-  };
-
-  auto nextTarget = [=, &NameBuf](Function *F) -> Function * {
-    bool CanDirectlyModify = false;
-    if (F == P) {
-      // Functions marked with the attribute _should_ be modified directly.
-      CanDirectlyModify = true;
-    } else {
-      GlobalValue::LinkageTypes L = F->getLinkage();
-      if (L == GlobalValue::LinkageTypes::InternalLinkage ||
-          L == GlobalValue::LinkageTypes::PrivateLinkage) {
-        // If all the users' functions have the same flag then this can be
-        // modified directly.
-        //
-        // This is a purposely simple heuristic. Completely determining whether
-        // the function can avoid being cloned requires SCC traversal of the
-        // call graph and can be more expensive than just cloning.
-        CanDirectlyModify = true;
-        for (User *U : F->users()) {
-          if (auto *I = dyn_cast<Instruction>(U)) {
-            if (readUnsafeFPMathTag(I->getFunction(), UnsafeFPMathID) ==
-                Flags) {
-              continue;
-            }
-          }
-          CanDirectlyModify = false;
-          break;
-        }
-      }
-    }
-
-    if (CanDirectlyModify) {
-      return F;
-    } else {
-      // oldname.fm{flags as hex}
-      StringRef NewName =
-          (F->getName() + ".fm" + Twine::utohexstr(Flags)).toStringRef(NameBuf);
-
-      // Get the previously cloned function or create a new one
-      Function *Clone = M->getFunction(NewName);
-      if (Clone == nullptr) {
-        ValueToValueMapTy VMap;
-        Clone = CloneFunction(F, VMap);
-        Clone->setName(NewName);
-        Clone->setLinkage(GlobalValue::LinkageTypes::InternalLinkage);
-      }
-      // Must manually clear to avoid concatenating the names.
-      NameBuf.clear();
-
-      return Clone;
-    }
-  };
-
-  while (!Stack.empty()) {
-    Function *F = Stack.back();
-    Stack.pop_back();
-
-    // Mark the function as traversed with respect to the current Flags.
-    tagUnsafeFPMath(F, Flags);
-
-    for (BasicBlock &BB : *F) {
-      for (Instruction &I : BB) {
-        if (isa<FPMathOperator>(I)) {
-          I.copyFastMathFlags(FMF);
-        }
-
-        if (auto *Call = dyn_cast<CallBase>(&I)) {
-          Function *Callee = Call->getCalledFunction();
-          if (isValidTarget(Callee)) {
-            Function *CalleeOrClone = nextTarget(Callee);
-            // If cloned..
-            if (Callee != CalleeOrClone) {
-              // Make the parent function call the Clone instead.
-              Call->setCalledFunction(CalleeOrClone);
-            }
-            Stack.push_back(CalleeOrClone);
-
-            // Rust doesn't emit the `callback` metadata so this does not do
-            // anything yet.
-            // // #include "llvm/IR/AbstractCallSite.h"
-            // forEachCallbackCallSite(*Call, [=, &Stack](AbstractCallSite &ACS) {
-            //   Function *Callback = ACS.getCalledFunction();
-            //   if (isValidTarget(Callback)) {
-            //     Function *CallbackOrClone = nextTarget(Callback);
-            //     if (Callback != CallbackOrClone) {
-            //       ACS.getInstruction()->setOperand(
-            //           ACS.getCallArgOperandNoForCallee(), CallbackOrClone);
-            //     }
-            //     Stack.push_back(CallbackOrClone);
-            //   }
-            // });
-          }
-        }
-      }
-    }
-  }
-}
-
 extern "C" void LLVMRustTagFunctionUnsafeFPMath(LLVMValueRef Fn,
                                                 uint32_t Flags) {
   Function *F = unwrap<Function>(Fn);
-  tagUnsafeFPMath(F, Flags);
+  Module *M = F->getParent();
+  LLVMContext &C = F->getContext();
+  // Mark this function with the flags
+  auto *FlagsAsConstantInt = ConstantInt::get(Type::getInt32Ty(C), Flags);
+  auto *FlagsAsMD = ConstantAsMetadata::get(FlagsAsConstantInt);
+  F->setMetadata(UnsafeFPMathTag, MDNode::get(C, {FlagsAsMD}));
 
   // Add to the list of functions with unsafe fp-math
-  Module *M = F->getParent();
-  LLVMContext &C = M->getContext();
   auto *List = M->getOrInsertNamedMetadata(UnsafeFPMathFunctionList);
-  auto *FuncName = MDString::get(C, F->getName());
-  List->addOperand(MDNode::get(C, {FuncName}));
+  List->addOperand(MDNode::get(C, {ValueAsMetadata::get(F)}));
 }
 
 extern "C" void LLVMRustCheckAndApplyUnsafeFPMath(LLVMModuleRef Mod) {
   Module *M = unwrap(Mod);
+
   if (auto *List = M->getNamedMetadata(UnsafeFPMathFunctionList)) {
+    SmallVector<Function *, 8> Stack;
+    SmallVector<char, 128> NameBuf;
+    ValueToValueMapTy VMap;
+
     // Querying with StringRef is relatively expensive so cache the metadata ID
     unsigned UnsafeFPMathID = M->getContext().getMDKindID(UnsafeFPMathTag);
 
-    // Loop through all functions with the #[fp_math(...)] attribute
+    auto FPMethodOrVectorIntrinsic = Regex(
+        // [legacy]
+        // std::f32::<impl f32>::
+        // std::f64::<impl f64>::
+        // core::f32::<impl f32>::
+        // core::f64::<impl f64>::
+        // core::core_arch::
+        "(_ZN("
+        "((3std|4core)3("
+        "f3221_\\$LT\\$impl\\$u20\\$f32|"
+        "f6421_\\$LT\\$impl\\$u20\\$f64)"
+        "\\$GT\\$)|"
+        "(4core9core_arch)))|"
+        // [v0]
+        // <f32>::
+        // <f64>::
+        // core::core_arch::
+        "(_RNv("
+        "(MNtCs(kKxLsFYgSDi_3std|59sSsiVHtSQ_4core)3(f32|f64))|"
+        "(NtNtNtCs59sSsiVHtSQ_4core9core_arch)))");
+
+    // Loop through all functions with the #[unsafe_fp_math(...)] attribute
     for (auto *MDN : List->operands()) {
-      auto *FuncName = cast<MDString>(MDN->getOperand(0).get());
-      Function *F = M->getFunction(FuncName->getString());
-      setUnsafeFPMathOnCallees(M, F, UnsafeFPMathID);
+      auto *MD = cast<ValueAsMetadata>(MDN->getOperand(0).get());
+      auto *F = cast<Function>(MD->getValue());
+
+      uint32_t Flags = readUnsafeFPMathTag(F, UnsafeFPMathID);
+      FastMathFlags FMF = rustUnsafeFPMathFlagsToFMF(Flags);
+
+      Stack.clear();
+      Stack.push_back(F);
+
+      // Do a depth-first search on the function and its callees
+      while (!Stack.empty()) {
+        for (BasicBlock &BB : *Stack.pop_back_val()) {
+          for (Instruction &I : BB) {
+            // Check the instructions that can have fast-math flags: `fneg`,
+            // `fadd`, `fsub`, `fmul`, `fdiv`, `frem`, `fcmp`, `phi`, `select`
+            // and also `call`'s return a floating-point scalar or vector type
+            if (isa<FPMathOperator>(I)) {
+              // Set the flags on the function
+              I.copyFastMathFlags(FMF);
+            }
+
+            // Inspect the direct callees (`call` or `invoke`) of this function.
+            if (auto *Call = dyn_cast<CallBase>(&I)) {
+              Function *Callee = Call->getCalledFunction();
+
+              // Not considering indirect calls
+              if (Callee == nullptr) {
+                continue;
+              }
+              // We can't access the definitions of intrinsics or externally
+              // defined functions so skip them
+              if (Callee->isIntrinsic() || Callee->isDeclaration()) {
+                continue;
+              }
+              // Only considering floating-point functions in `std` and
+              // intrinsics in `core::arch`
+              if (!FPMethodOrVectorIntrinsic.match(Callee->getName())) {
+                continue;
+              }
+
+              bool MustClone = true;
+
+              GlobalValue::LinkageTypes L = Callee->getLinkage();
+              if (L == GlobalValue::LinkageTypes::InternalLinkage ||
+                  L == GlobalValue::LinkageTypes::PrivateLinkage) {
+                // If all the users of this function have the same flag then
+                // this can be modified directly
+                MustClone = false;
+                for (User *U : Callee->users()) {
+                  if (auto *I = dyn_cast<Instruction>(U)) {
+                    uint32_t UserFlags =
+                        readUnsafeFPMathTag(I->getFunction(), UnsafeFPMathID);
+                    if (UserFlags != Flags) {
+                      MustClone = true;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              if (MustClone) {
+                // Would concatenate the names if not cleared
+                NameBuf.clear();
+                // Append `.fm{flags as hex}` to the original name
+                StringRef NewName =
+                    (Callee->getName() + ".fm" + Twine::utohexstr(Flags))
+                        .toStringRef(NameBuf);
+
+                // Get the previously cloned function or create a new one
+                Function *Clone = M->getFunction(NewName);
+                if (Clone == nullptr) {
+                  // Must clear the reused VMap for the next cloning
+                  VMap.clear();
+                  Clone = CloneFunction(Callee, VMap);
+                  Clone->setName(NewName);
+                }
+
+                // Make the parent function call the clone instead
+                Call->setCalledFunction(Clone);
+                Callee = Clone;
+              }
+
+              // At this point, Callee is either a clone or can be modified
+              // directly so it can be safely added to the DFS stack
+              Stack.push_back(Callee);
+            }
+          }
+        }
+      }
     }
   }
 }
