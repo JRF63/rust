@@ -405,7 +405,9 @@ bool isFPMethodOrVectorIntrinsic(Function *F) {
     "_ZN("
     // std::f32::<impl f32>::
     // std::f64::<impl f64>::
-    R"(3std3(f32|f64)21_\$LT\$impl\$u20\$(f32|f64)\$GT\$|)"
+    // core::f32::<impl f32>::
+    // core::f64::<impl f64>::
+    R"((3std|4core)3(f32|f64)21_\$LT\$impl\$u20\$(f32|f64)\$GT\$|)"
     // <f32 as core::ops::arith::
     // <f64 as core::ops::arith::
     R"(.+_\$LT\$(f32|f64)\$u20\$as\$u20\$core\.\.ops\.\.arith\.\.|)"
@@ -434,25 +436,7 @@ extern "C" void LLVMRustUnsafeFPMathAddMetadata(LLVMValueRef Fn,
   }
 }
 
-extern "C" void LLVMRustUnsafeFPMathApplyOnModule(LLVMModuleRef Mod,
-                                                  uint32_t Flags) {
-  FastMathFlags FMF = rustUnsafeFPMathFlagsToFMF(Flags);
-
-  if (FMF.any()) {
-    Module *M = unwrap(Mod);
-    for (Function &F : *M) {
-      for (BasicBlock &BB : F) {
-        for (Instruction &I : BB) {
-          if (isa<FPMathOperator>(I)) {
-            I.copyFastMathFlags(FMF);
-          }
-        }
-      }
-    }
-  }
-}
-
-extern "C" void LLVMRustUnsafeFPMathApplyOnFunctions(LLVMModuleRef Mod) {
+extern "C" void LLVMRustUnsafeFPMathApplyOnTaggedFunctions(LLVMModuleRef Mod) {
   Module *M = unwrap(Mod);
 
   if (auto *List = M->getNamedMetadata(UnsafeFPMathFunctionList)) {
@@ -496,9 +480,8 @@ extern "C" void LLVMRustUnsafeFPMathApplyOnFunctions(LLVMModuleRef Mod) {
 
         // Inline the current call and add its subcalls for processing
         IFI.reset();
-        if (InlineFunction(Call, IFI)) {
-          for (CallSite CS : IFI.InlinedCallSites) {
-            CallBase *SubCall = cast<CallBase>(CS.getInstruction());
+        if (InlineFunction(*Call, IFI).isSuccess()) {
+          for (CallBase *SubCall : IFI.InlinedCallSites) {
             Calls.push_back(SubCall);
           }
         }

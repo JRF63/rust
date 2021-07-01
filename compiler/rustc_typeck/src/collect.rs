@@ -2971,6 +2971,16 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                 },
                 None => None,
             };
+        } else if tcx.sess.check_name(attr, sym::unsafe_fp_math) {
+            if !tcx.is_closure(id) && tcx.fn_sig(id).unsafety() == hir::Unsafety::Normal {
+                tcx.sess
+                    .struct_span_err(
+                        attr.span,
+                        "`#[unsafe_fp_math(..)]` can only be applied to `unsafe` functions",
+                    )
+                    .span_label(tcx.def_span(id), "not an `unsafe` function")
+                    .emit();
+            }
         }
     }
 
